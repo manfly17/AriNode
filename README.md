@@ -1,5 +1,27 @@
 # AriNode
 
+### AriNode Management Script
+
+An interactive management script designed to simplify AriNode installation, deployment, configuration, and routine maintenance. It provides Sing-box / Xray core management, XBoard node configuration, TLS certificate management, DNS configuration, backup and recovery, and service management.
+
+#### Download and Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/manfly17/AriNode/refs/heads/main/AriNode.sh \
+  -o /root/AriNode.sh && \
+chmod +x /root/AriNode.sh && \
+ln -sfn /root/AriNode.sh /usr/local/bin/ari-node && \
+/root/AriNode.sh install
+```
+
+#### Run Again
+
+After installation, use the following command to open the interactive management menu:
+
+```bash
+ari-node
+```
+
 ## HY1 and VLESS live user updates
 
 The default `sing` backend now uses stable authentication generations for Hysteria v1 and VLESS, avoiding array-position changes after deleting users. VLESS revocation closes that user's parent and TCP/UDP child sessions, preserves healthy users and other nodes, and retains final traffic under the original panel UID. Follow-up fixes also cover VMess AEAD, Trojan, classic Shadowsocks, Xray dispatch registration, and standalone Hysteria2 authentication. [Scope and remaining gaps](docs/user-revocation-followup.md). Native traffic push still cannot guarantee exactly-once billing after a lost acknowledgement. See [reproduction and test scope](docs/hy1-vless-user-updates.md).
