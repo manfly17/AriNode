@@ -1618,7 +1618,7 @@ PY_DNS_CUR
     echo
     echo "===================================="
     if [[ -z "$dns_ip" ]]; then
-        read -e -r -p "请输入万国解锁 DNS IP [${current}]: " dns_ip
+        read -e -r -p "请输入解锁 DNS IP [${current}]: " dns_ip
         dns_ip="${dns_ip:-$current}"
     fi
     backup_all || return 1
@@ -1750,7 +1750,7 @@ dns_menu() {
         echo
         echo "1. 设置 / 修改 DNS 解锁 IP"
         echo "2. 停用自定义 DNS（恢复原配置）"
-        echo "0. 返回高级功能"
+        echo "0. 返回主菜单"
         read -e -r -p "请选择 [0-2]： " choice
         case "$choice" in
             1) dns_apply || red "DNS 设置失败。"; pause ;;
@@ -1863,7 +1863,7 @@ version_upgrade_menu() {
         echo
         echo "1. 检查官方最新版本"
         echo "2. 升级 AriNode"
-        echo "0. 返回主菜单"
+        echo "0. 返回高级功能"
         read -e -r -p "请选择 [0-2]： " choice
         case "$choice" in
             1) check_upgrade || red "版本检查失败。"; pause ;;
