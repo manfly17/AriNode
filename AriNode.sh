@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AriNode 安装与管理脚本（优化版）
-# Script revision: 2026-11-16
+# Script revision: 2026-11-17
 # 安装后管理命令：ari-node
 # 适用：Debian / Ubuntu（systemd，Linux amd64 / arm64）
 # AriNode 本身采用官方原生二进制 + systemd，不依赖 Docker。
@@ -116,12 +116,12 @@ install_manager_command() {
 }
 
 # -------------------- Xboard 协议 / TLS / 证书配置 --------------------
-# 依据 Xboard 普通节点 UniProxy v1 返回的实际 TLS/REALITY 字段识别证书需求；
-# 仅处理 AriNode 支持的服务端入站协议，不把 Xboard 订阅/其他入站类型误认为 AriNode 支持。
+# 依据 Xboard 普通节点 UniProxy v1 返回的协议/TLS 字段，并对齐 AriNode 20261115-46fc2b5c 的原生解析及内核入站实现；
+# 先判定 Security（None/TLS/REALITY），再按实际内核、协议版本和传输组合决定普通证书需求。
 configure_tls_certificates() {
     local config_file="$1" panel_url="${2:-}" mode="${3:-initial}"
     ARINODE_PANEL_TOKEN="${ARINODE_PANEL_TOKEN:-}" python3 - "$config_file" "$panel_url" "$mode" <<'PY_TLS_SETUP'
-import copy, getpass, ipaddress, json, os, pathlib, re, shutil, socket, ssl, subprocess, sys, tempfile, urllib.error, urllib.parse, urllib.request
+import copy, getpass, ipaddress, json, os, pathlib, re, shutil, socket, ssl, subprocess, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
 
 config_path = pathlib.Path(sys.argv[1])
 panel_url = (sys.argv[2] or '').rstrip('/')
@@ -211,17 +211,13 @@ def panel_binding(cfg, node):
 
 def tls_info(node, data):
     """
-    AriNode 协议与 TLS 决策引擎。
-    Xboard 不负责签发证书；cert_config 只是可选策略信息。
+    Mirror AriNode 20261115-46fc2b5c api/panel/node.go and the actual
+    Sing-box/Xray inbound builders. Decide certificate need from the
+    parsed Security mode, not from the mere presence of cert_config.
     """
     settings = data.get('protocol_settings') or data.get('protocolSettings') or data
     if not isinstance(settings, dict):
         settings = data
-
-    protocol = str(
-        node.get('NodeType') or data.get('protocol') or
-        data.get('node_type') or ''
-    ).strip().lower()
 
     aliases = {
         'ss': 'shadowsocks',
@@ -229,9 +225,25 @@ def tls_info(node, data):
         'hysteria2': 'hysteria',
         'v2ray': 'vmess',
     }
-    protocol = aliases.get(protocol, protocol)
 
-    # 读取实际节点内核，而不是只看安装时的全局选择。
+    protocol = str(node.get('NodeType') or '').strip().lower()
+    protocol = aliases.get(protocol, protocol)
+    api_protocol = str(
+        data.get('protocol') or data.get('node_type') or data.get('type') or ''
+    ).strip().lower()
+    api_protocol = aliases.get(api_protocol, api_protocol)
+    if not protocol:
+        protocol = api_protocol
+    elif api_protocol and api_protocol != protocol:
+        raise RuntimeError(
+            f'节点 {node.get("NodeID")} 配置协议 {protocol!r} 与 Xboard API 返回协议 '
+            f'{api_protocol!r} 不一致，拒绝继续。'
+        )
+
+    if not protocol:
+        raise RuntimeError(f'节点 {node.get("NodeID")} 无法确认 Xboard 协议类型')
+
+    # 必须检查当前节点最终实际使用的内核。
     core = str(node.get('Core') or '').strip().lower()
     if core in ('singbox', 'sing-box'):
         core = 'sing'
@@ -240,71 +252,82 @@ def tls_info(node, data):
             f'节点 {node.get("NodeID")} 未指定有效内核：{core!r}'
         )
 
-    # Xray 只允许 AriNode 当前明确支持的协议。
-    if core == 'xray':
-        if protocol not in ('vmess', 'vless', 'trojan', 'shadowsocks'):
-            raise RuntimeError(
-                f'节点 {node.get("NodeID")}：Xray 内核不支持 '
-                f'{protocol}，请改用 Sing-box。'
-            )
-
     tls_value = settings.get('tls', data.get('tls'))
     tls_obj = tls_value if isinstance(tls_value, dict) else {}
 
     tls_settings = (
-        settings.get('tls_settings') or
-        settings.get('tlsSettings') or
-        data.get('tls_settings') or
-        data.get('tlsSettings') or {}
+        settings.get('tls_settings') or settings.get('tlsSettings') or
+        data.get('tls_settings') or data.get('tlsSettings') or {}
     )
-    reality_settings = (
-        settings.get('reality_settings') or
-        settings.get('realitySettings') or
-        data.get('reality_settings') or
-        data.get('realitySettings') or {}
-    )
-
     if not isinstance(tls_settings, dict):
         tls_settings = {}
+
+    # Xboard currently serializes VLESS/Trojan Reality settings into
+    # tls_settings when tls=2; older/custom responses may use reality_settings.
+    reality_settings = (
+        settings.get('reality_settings') or settings.get('realitySettings') or
+        data.get('reality_settings') or data.get('realitySettings') or {}
+    )
     if not isinstance(reality_settings, dict):
         reality_settings = {}
 
-    raw_mode = tls_value
-    if isinstance(tls_value, dict):
-        raw_mode = tls_value.get('mode', tls_value.get('type'))
-        if raw_mode is None and 'enabled' in tls_value:
-            raw_mode = 1 if truthy(tls_value.get('enabled')) else 0
-        elif raw_mode is None and tls_value:
-            raw_mode = 1
-
-    if isinstance(raw_mode, str):
-        raw_mode = raw_mode.strip().lower()
-        raw_mode = {
+    def parse_security(value):
+        if isinstance(value, dict):
+            if 'mode' in value:
+                value = value.get('mode')
+            elif 'type' in value:
+                value = value.get('type')
+            elif 'enabled' in value:
+                value = 1 if truthy(value.get('enabled')) else 0
+            elif value:
+                value = 1
+            else:
+                value = None
+        if isinstance(value, bool):
+            return 1 if value else 0
+        if isinstance(value, (int, float)):
+            if int(value) != value:
+                raise RuntimeError(f'TLS 模式不是整数：{value!r}')
+            return int(value)
+        text = str(value or '').strip().lower()
+        aliases = {
             'tls': 1, 'on': 1, 'true': 1, 'yes': 1,
             'reality': 2,
             'off': 0, 'false': 0, 'no': 0, 'none': 0,
-            '': None,
-        }.get(raw_mode, raw_mode)
+        }
+        if text in aliases:
+            return aliases[text]
+        if text.isdigit():
+            return int(text)
+        if text == '':
+            return None
+        raise RuntimeError(f'无法识别 TLS 模式：{value!r}')
 
-    reality_keys = (
-        'private_key', 'privateKey',
-        'short_id', 'shortId',
-        'public_key', 'publicKey',
-    )
-    has_reality = (
-        any(reality_settings.get(k) for k in reality_keys) or
-        any(tls_settings.get(k) for k in reality_keys)
-    )
+    # AriNode's native API parser reads tls as an integer for VMess/VLESS
+    # and Trojan. Xboard buildNodeConfig always emits this field for these
+    # protocols; missing values are treated as an API/schema mismatch.
+    security = None
+    if protocol in ('vmess', 'vless', 'trojan'):
+        security = parse_security(tls_value)
+        if security is None:
+            raise RuntimeError(
+                f'节点 {node.get("NodeID")} 的 {protocol.upper()} 没有明确返回 tls 模式 '
+                '(0=关闭、1=TLS、2=REALITY)；拒绝猜测。'
+            )
+        if security not in (0, 1, 2):
+            raise RuntimeError(
+                f'节点 {node.get("NodeID")} 的 {protocol.upper()} TLS 模式无效：{security}'
+            )
 
-    if has_reality:
-        raw_mode = 2
-
+    # AriNode's NativeTLSSettings is read from tls_settings.server_name,
+    # allow_insecure and alpn. For HY/TUIC/AnyTLS, tls_settings is a TLS object,
+    # not the numeric tls mode used by VMess/VLESS/Trojan.
     server_name = str(
         tls_settings.get('server_name') or
         tls_obj.get('server_name') or
         reality_settings.get('server_name') or
-        data.get('server_name') or
-        data.get('sni') or ''
+        settings.get('server_name') or
+        data.get('server_name') or data.get('sni') or ''
     ).strip()
 
     allow_insecure = truthy(
@@ -318,118 +341,168 @@ def tls_info(node, data):
     )
 
     version = settings.get('version', data.get('version'))
+    if version in ('', None):
+        version = None
     transport = str(
-        settings.get('network') or
-        settings.get('transport') or
-        data.get('network') or
-        data.get('transport') or ''
+        settings.get('network') or settings.get('transport') or
+        data.get('network') or data.get('transport') or 'tcp'
     ).strip().lower()
+    if not transport:
+        transport = 'tcp'
 
-    # REALITY 不是普通 ACME TLS 证书。
-    if protocol == 'vless' and raw_mode in (2, '2'):
-        reality_private = (
-            reality_settings.get('private_key') or
-            reality_settings.get('privateKey') or
-            tls_settings.get('private_key') or
-            tls_settings.get('privateKey')
-        )
-        reality_short = (
-            reality_settings.get('short_id') or
-            reality_settings.get('shortId') or
-            tls_settings.get('short_id') or
-            tls_settings.get('shortId')
-        )
-        if not reality_private or not reality_short:
+    # Validate the protocol/core/transport combinations against the actual
+    # AriNode builders, not just Xboard's wider subscription protocol list.
+    if core == 'xray':
+        if protocol not in ('vmess', 'vless', 'trojan', 'shadowsocks'):
             raise RuntimeError(
-                f'节点 {node.get("NodeID")} 被识别为 VLESS REALITY，'
-                '但缺少 private_key 或 short_id，拒绝继续部署。'
+                f'节点 {node.get("NodeID")}：AriNode Xray 内核不支持 {protocol} 入站；'
+                '请改用 Sing-box。'
             )
-        need, label = False, 'VLESS REALITY'
+        if protocol in ('vmess', 'vless'):
+            allowed = {'tcp', 'ws', 'grpc', 'httpupgrade', 'xhttp', 'splithttp'}
+            if transport not in allowed:
+                raise RuntimeError(
+                    f'节点 {node.get("NodeID")}：Xray {protocol.upper()} 不支持 '
+                    f'{transport} 传输；当前 AriNode 仅实现 {", ".join(sorted(allowed))}。'
+                )
+        elif protocol == 'trojan':
+            allowed = {'tcp', 'ws', 'grpc'}
+            if transport not in allowed:
+                raise RuntimeError(
+                    f'节点 {node.get("NodeID")}：AriNode Xray Trojan 不支持 '
+                    f'{transport} 传输；仅支持 TCP / WebSocket / gRPC。'
+                )
+    else:
+        if protocol in ('vmess', 'vless'):
+            allowed = {'tcp', 'ws', 'grpc', 'httpupgrade', 'http', 'h2'}
+            if transport not in allowed and not (
+                protocol == 'vless' and transport in ('xhttp', 'splithttp')
+            ):
+                raise RuntimeError(
+                    f'节点 {node.get("NodeID")}：Sing-box {protocol.upper()} 不支持 '
+                    f'{transport} 传输；VLESS XHTTP 会由 AriNode 自动交给内置 Xray。'
+                )
+        elif protocol == 'trojan':
+            allowed = {'tcp', 'ws', 'grpc', 'httpupgrade', 'http', 'h2'}
+            if transport not in allowed:
+                raise RuntimeError(
+                    f'节点 {node.get("NodeID")}：Sing-box Trojan 不支持 '
+                    f'{transport} 传输；支持 TCP / WS / gRPC / HTTPUpgrade / HTTP(h2)。'
+                )
 
-    elif protocol in ('vmess', 'vless'):
-        if raw_mode in (1, '1', True):
-            need, label = True, protocol.upper() + ' + TLS'
-        elif raw_mode in (0, '0', False):
-            need, label = False, protocol.upper() + '（无普通 TLS）'
-        elif raw_mode is None:
-            raise RuntimeError(
-                f'节点 {node.get("NodeID")} 的 {protocol.upper()} '
-                '没有返回明确 TLS 字段。不能猜测为关闭 TLS；'
-                '请检查 Xboard 节点 TLS 设置及 UniProxy API 响应。'
-            )
+    if protocol == 'vless':
+        if security == 2:
+            # Reality is not a normal ACME certificate. AriNode consumes
+            # these exact fields in both Sing-box and Xray inbound builders.
+            reality = dict(reality_settings)
+            reality.update({k: v for k, v in tls_settings.items() if v not in (None, '')})
+            private_key = reality.get('private_key') or reality.get('privateKey')
+            short_id = reality.get('short_id') or reality.get('shortId')
+            reality_sni = str(reality.get('server_name') or server_name).strip()
+            server_port = reality.get('server_port') or reality.get('serverPort')
+            try:
+                port = int(str(server_port).strip())
+            except (TypeError, ValueError):
+                port = 0
+            if not private_key or not short_id or not reality_sni or not 1 <= port <= 65535:
+                raise RuntimeError(
+                    f'节点 {node.get("NodeID")} 被 Xboard 标记为 VLESS REALITY，'
+                    '但缺少有效的 private_key / short_id / server_name / server_port；'
+                    '拒绝把它误判为普通 TLS。'
+                )
+            need, label = False, 'VLESS REALITY（无需普通证书）'
+        elif security == 1:
+            need, label = True, 'VLESS + TLS'
         else:
+            need, label = False, 'VLESS（关闭 TLS）'
+
+    elif protocol == 'vmess':
+        if security == 2:
             raise RuntimeError(
-                f'节点 {node.get("NodeID")} 的 TLS 参数无法识别：'
-                f'{raw_mode!r}'
+                f'节点 {node.get("NodeID")} VMess 返回 tls=2（REALITY）；'
+                '当前 AriNode/Xboard VMess 配置链没有提供受支持的 VMess REALITY 参数。'
             )
+        if security == 1:
+            need, label = True, 'VMess + TLS'
+        else:
+            need, label = False, 'VMess（关闭 TLS）'
 
     elif protocol == 'trojan':
-        if raw_mode in (0, '0', False):
-            raise RuntimeError(
-                f'节点 {node.get("NodeID")} Trojan 未启用 TLS，'
-                '请检查面板设置。'
-            )
-        if raw_mode in (2, '2'):
-            raise RuntimeError(
-                f'节点 {node.get("NodeID")} Trojan REALITY 暂不自动处理；'
-                '请确认当前 AriNode Trojan 入站实现支持该组合。'
-            )
-        need, label = True, 'Trojan + TLS'
+        if security == 2:
+            reality = dict(reality_settings)
+            reality.update({k: v for k, v in tls_settings.items() if v not in (None, '')})
+            private_key = reality.get('private_key') or reality.get('privateKey')
+            short_id = reality.get('short_id') or reality.get('shortId')
+            reality_sni = str(reality.get('server_name') or server_name).strip()
+            server_port = reality.get('server_port') or reality.get('serverPort')
+            try:
+                port = int(str(server_port).strip())
+            except (TypeError, ValueError):
+                port = 0
+            if not private_key or not short_id or not reality_sni or not 1 <= port <= 65535:
+                raise RuntimeError(
+                    f'节点 {node.get("NodeID")} 被 Xboard 标记为 Trojan REALITY，'
+                    '但缺少有效的 private_key / short_id / server_name / server_port。'
+                )
+            need, label = False, 'Trojan REALITY（无需普通证书）'
+        elif security == 1:
+            need, label = True, 'Trojan + TLS'
+        else:
+            need, label = False, 'Trojan（关闭 TLS）'
 
     elif protocol == 'hysteria':
-        if version not in (None, '', 0, '0', 1, '1', 2, '2'):
+        if version not in (None, 0, '0', 1, '1', 2, '2'):
             raise RuntimeError(
                 f'节点 {node.get("NodeID")} Hysteria 版本不支持：{version!r}'
             )
-        if version in (None, '', 0, '0', 1, '1'):
-            version = 1
-            up = (
-                settings.get('up_mbps') or settings.get('upMbps') or
-                data.get('up_mbps') or data.get('upMbps')
-            )
-            down = (
-                settings.get('down_mbps') or settings.get('downMbps') or
-                data.get('down_mbps') or data.get('downMbps')
-            )
+        if version in (None, 0, '0', 1, '1'):
+            up = settings.get('up_mbps', settings.get('upMbps', data.get('up_mbps', data.get('upMbps'))))
+            down = settings.get('down_mbps', settings.get('downMbps', data.get('down_mbps', data.get('downMbps'))))
             try:
                 if float(up) <= 0 or float(down) <= 0:
                     raise ValueError
             except (TypeError, ValueError):
                 raise RuntimeError(
-                    f'节点 {node.get("NodeID")} 按 HY1 处理，'
-                    '但缺少有效上下行带宽配置。'
+                    f'节点 {node.get("NodeID")} 按 HY1 处理，但缺少有效的正数 up_mbps / down_mbps。'
                 )
+            version = 1
         need = True
         label = 'Hysteria 2（HY2）' if str(version) == '2' else 'Hysteria 1（HY1）'
 
     elif protocol == 'tuic':
-        if version not in (None, '', 0, '0', 5, '5'):
+        if version not in (None, 0, '0', 5, '5'):
             raise RuntimeError(
-                f'节点 {node.get("NodeID")} TUIC 版本不支持：{version!r}'
+                f'节点 {node.get("NodeID")} TUIC 版本不支持：{version!r}；AriNode 仅支持 TUIC v5。'
             )
         need, label = True, 'TUIC v5'
 
     elif protocol == 'anytls':
         need, label = True, 'AnyTLS'
 
-    elif protocol in ('shadowsocks', 'mieru'):
-        need, label = False, protocol.upper()
+    elif protocol == 'shadowsocks':
+        need, label = False, 'Shadowsocks（无需普通证书）'
+
+    elif protocol == 'mieru':
+        if transport not in ('tcp', 'udp'):
+            raise RuntimeError(
+                f'节点 {node.get("NodeID")} 的 Mieru transport={transport!r} 无效；'
+                'AriNode 仅支持 TCP / UDP。'
+            )
+        need, label = False, 'Mieru（无需普通证书）'
 
     else:
         raise RuntimeError(
-            f'节点 {node.get("NodeID")} 的协议 {protocol!r} '
-            '不在当前 AriNode 支持列表中。'
+            f'节点 {node.get("NodeID")} 的协议 {protocol!r} 不在当前 AriNode 支持列表中。'
         )
 
-    # cert_config 是可选字段。没有它不代表不需要证书。
+    # cert_config is optional. Its absence never means a TLS protocol is
+    # plaintext; AriNode applies local CertConfig / auto policy separately.
     cert = (
-        settings.get('cert_config') or
-        settings.get('certConfig') or
-        data.get('cert_config') or
-        data.get('certConfig') or {}
+        settings.get('cert_config') or settings.get('certConfig') or
+        data.get('cert_config') or data.get('certConfig') or {}
     )
     if not isinstance(cert, dict):
-        cert = {}
+        raise RuntimeError(f'节点 {node.get("NodeID")} 的 cert_config 不是对象')
 
     panel_mode = str(
         cert.get('cert_mode') or cert.get('mode') or ''
@@ -462,53 +535,160 @@ def valid_domain(value, allow_wildcard=False):
 def validate_pair(cert_path, key_path):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(str(cert_path), str(key_path))
+    # AriNode rejects expired/not-yet-valid panel content certificates when
+    # publishing them; check the same validity window before completing setup.
+    decoded = ssl._ssl._test_decode_cert(str(cert_path))
+    now = time.time()
+    not_before = ssl.cert_time_to_seconds(decoded['notBefore'])
+    not_after = ssl.cert_time_to_seconds(decoded['notAfter'])
+    if now < not_before or now >= not_after:
+        raise ValueError('证书当前不在有效期内')
 
 
-def panel_cert_status(node_id, cert, mode, allow_insecure):
+def panel_cert_status(node_id, cert, mode, allow_insecure, server_name=''):
+    mode = str(mode or '').strip().lower()
+
     if mode in ('self-signed', 'selfsigned'):
-        raise RuntimeError(f'节点 {node_id} 的面板 cert_mode={mode} 不符合 AriNode 要求；请在 Xboard 中改为 self')
+        raise RuntimeError(
+            f'节点 {node_id} 的面板 cert_mode={mode} 不符合 AriNode 源码要求；'
+            'AriNode 接受 self，不接受 self-signed。请在 Xboard 中修正后再部署。'
+        )
+
+    if mode == 'none':
+        print('  Xboard 明确未提供面板证书；按 AriNode 源码行为保留本地 CertConfig，接下来由管理脚本配置本地证书。')
+        return False
+
     if mode not in ('http', 'dns', 'self', 'file', 'content', 'auto'):
-        raise RuntimeError(f'节点 {node_id} 的面板 cert_mode={mode!r} 暂不支持；拒绝静默忽略')
+        raise RuntimeError(
+            f'节点 {node_id} 的面板 cert_mode={mode!r} 暂不支持；拒绝静默忽略。'
+        )
+
     if mode == 'auto':
         if allow_insecure:
-            print(f'  Xboard 已选择 auto，且允许不安全证书；保留 AriNode 持久化自签模式。')
+            print('  Xboard 已选择 auto，且 allow_insecure=true；AriNode 将使用持久化自签证书。')
             return True
+        print('  Xboard 选择 auto，但 allow_insecure=false；AriNode 不允许自动使用不受信任的自签证书。')
         return False
-    domain = cert.get('domain') or cert.get('cert_domain') or cert.get('CertDomain') or ''
-    cert_file = cert.get('cert_file') or cert.get('CertFile') or ''
-    key_file = cert.get('key_file') or cert.get('KeyFile') or ''
-    if mode in ('http', 'dns', 'self') and not domain:
-        raise RuntimeError(f'节点 {node_id} 的面板证书模式为 {mode}，但没有填写 domain；请先在 Xboard 面板补全')
-    if mode in ('http', 'dns', 'self') and (not cert_file or not key_file):
-        raise RuntimeError(f'节点 {node_id} 的面板证书模式为 {mode}，但缺少 cert_file/key_file；请在 Xboard 证书配置中补全证书和私钥保存路径')
-    if mode == 'dns':
-        provider = cert.get('dns_provider') or cert.get('Provider') or cert.get('provider')
-        dns_env = cert.get('dns_env') or cert.get('DNSEnv') or {}
-        if not provider or not isinstance(dns_env, dict) or not dns_env:
-            raise RuntimeError(f'节点 {node_id} 的面板证书模式为 dns，但缺少 dns_provider 或 dns_env；请在 Xboard 补全 DNS API 凭据')
+
+    domain = str(
+        cert.get('domain') or cert.get('cert_domain') or
+        cert.get('CertDomain') or server_name or ''
+    ).strip()
+    cert_file = str(cert.get('cert_file') or cert.get('CertFile') or '').strip()
+    key_file = str(cert.get('key_file') or cert.get('KeyFile') or '').strip()
+
+    if mode in ('http', 'dns', 'self'):
+        if not domain:
+            raise RuntimeError(
+                f'节点 {node_id} 的面板证书模式为 {mode}，但 domain 和 TLS SNI 均为空；'
+                '请在 Xboard 填写证书域名或 TLS server_name。'
+            )
+        if not valid_domain(domain, allow_wildcard=(mode == 'dns')):
+            raise RuntimeError(
+                f'节点 {node_id} 的证书域名无效：{domain!r}；'
+                'HTTP-01/self 不接受通配符，DNS-01 可使用 *.example.com。'
+            )
+
+    # AriNode itself derives ACME paths for http/dns and creates a persistent
+    # self-signed pair for self when both paths are omitted. Requiring paths
+    # here would reject valid panel configurations accepted by the Go backend.
+    if bool(cert_file) != bool(key_file):
+        raise RuntimeError(
+            f'节点 {node_id} 的面板证书只填写了 cert_file 或 key_file 其中一个；'
+            '两者必须同时填写，或同时留空交由 AriNode 自动生成路径。'
+        )
+
     if mode == 'file':
-        cp = cert_file
-        kp = key_file
-        if not cp or not kp or not pathlib.Path(cp).is_file() or not pathlib.Path(kp).is_file():
-            raise RuntimeError(f'节点 {node_id} 的面板 file 证书路径在本机不存在，请检查面板下发路径')
-    if mode == 'content':
+        if not cert_file or not key_file:
+            raise RuntimeError(
+                f'节点 {node_id} 的面板 file 证书模式缺少 cert_file/key_file。'
+            )
+        cp, kp = pathlib.Path(cert_file), pathlib.Path(key_file)
+        if not cp.is_file() or not kp.is_file():
+            raise RuntimeError(
+                f'节点 {node_id} 的面板 file 证书路径在本机不存在：'
+                f'{cert_file} / {key_file}'
+            )
+        try:
+            validate_pair(cp, kp)
+        except Exception as exc:
+            raise RuntimeError(
+                f'节点 {node_id} 的面板 file 证书/私钥无法配对：{exc}'
+            )
+
+    elif mode == 'content':
         cert_pem = cert.get('cert_content') or cert.get('CertContent')
         key_pem = cert.get('key_content') or cert.get('KeyContent')
         if not cert_pem or not key_pem:
-            raise RuntimeError(f'节点 {node_id} 的面板 content 证书缺少证书内容或私钥')
-        import tempfile
+            raise RuntimeError(
+                f'节点 {node_id} 的面板 content 证书缺少 cert_content 或 key_content。'
+            )
         with tempfile.TemporaryDirectory(prefix='arinode-panel-cert-check-') as td:
             cp = pathlib.Path(td) / 'cert.pem'
             kp = pathlib.Path(td) / 'key.pem'
-            cp.write_text(cert_pem, encoding='utf-8')
-            kp.write_text(key_pem, encoding='utf-8')
+            cp.write_text(str(cert_pem), encoding='utf-8')
+            kp.write_text(str(key_pem), encoding='utf-8')
             try:
                 validate_pair(cp, kp)
             except Exception as exc:
-                raise RuntimeError(f'节点 {node_id} 的面板 content 证书/私钥无法配对：{exc}')
-    print(f'  面板已配置证书模式：{mode}' + (f'，域名：{domain}' if domain else ''))
-    return True
+                raise RuntimeError(
+                    f'节点 {node_id} 的面板 content 证书/私钥无法配对：{exc}'
+                )
 
+    elif mode == 'self':
+        if cert_file and key_file:
+            cp, kp = pathlib.Path(cert_file), pathlib.Path(key_file)
+            # AriNode generates the self-signed pair when either file is absent.
+            # If both already exist, validate the pair before trusting the panel config.
+            if cp.is_file() and kp.is_file():
+                try:
+                    validate_pair(cp, kp)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f'节点 {node_id} 的面板 self 证书/私钥无法配对：{exc}'
+                    )
+
+    elif mode in ('http', 'dns'):
+        if cert_file and key_file:
+            # Explicit paths are valid ACME targets. If both files already
+            # exist AriNode reuses them, so validate their key pair now.
+            cp, kp = pathlib.Path(cert_file), pathlib.Path(key_file)
+            if cp.is_file() and kp.is_file():
+                try:
+                    validate_pair(cp, kp)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f'节点 {node_id} 的面板 {mode} 证书/私钥无法配对：{exc}'
+                    )
+        if mode == 'http':
+            raw_port = cert.get('http_port', cert.get('HTTPPort', 0))
+            try:
+                port = int(raw_port or 0)
+            except (TypeError, ValueError):
+                raise RuntimeError(f'节点 {node_id} 的 HTTP-01 http_port 无效：{raw_port!r}')
+            if not 0 <= port <= 65535:
+                raise RuntimeError(f'节点 {node_id} 的 HTTP-01 http_port 超出 0–65535。')
+            if port == 0:
+                print('  HTTP-01 未指定端口，AriNode 将使用默认 TCP 80。')
+        else:
+            provider = (
+                cert.get('dns_provider') or cert.get('Provider') or
+                cert.get('provider') or ''
+            )
+            dns_env = cert.get('dns_env') or cert.get('DNSEnv') or {}
+            if not provider or not isinstance(dns_env, dict) or not dns_env:
+                raise RuntimeError(
+                    f'节点 {node_id} 的面板 DNS-01 配置缺少 dns_provider 或 dns_env。'
+                )
+            if any(not str(k).strip() or not str(v).strip() for k, v in dns_env.items()):
+                raise RuntimeError(f'节点 {node_id} 的 DNS-01 环境变量包含空 KEY/VALUE。')
+
+    print(
+        f'  面板证书配置已通过 AriNode 兼容性检查：{mode}'
+        + (f'，域名：{domain}' if domain else '')
+        + ('（证书路径由 AriNode 自动生成）' if mode in ('http', 'dns', 'self') and not cert_file else '')
+    )
+    return True
 
 def configure_one(node, data, info, cfg):
     node_id = int(node.get('NodeID') or 0)
@@ -521,9 +701,7 @@ def configure_one(node, data, info, cfg):
         return False
 
     if panel_mode:
-        if panel_mode == 'none':
-            raise RuntimeError(f'节点 {node_id} 的 Xboard 面板明确设置 cert_mode=none，但该协议需要 TLS；请先在面板修改证书模式')
-        if panel_cert_status(node_id, panel_cert, panel_mode, allow_insecure):
+        if panel_cert_status(node_id, panel_cert, panel_mode, allow_insecure, server_name):
             print('  证书由 Xboard 面板管理，本脚本不覆盖。')
             return False
 
