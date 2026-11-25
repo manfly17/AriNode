@@ -33,6 +33,17 @@ ln -sfn /root/AriNode.sh /usr/local/bin/ari-node && \
 ari-node
 ```
 
+### 系统清理工具
+
+### 安装与运行
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/manfly17/Xboard-Node/refs/heads/dev/sys-clean.sh \
+  -o /root/sys-clean.sh && \
+chmod +x /root/sys-clean.sh && \
+bash /root/sys-clean.sh
+```
+
 ## HY1 和 VLESS 用户实时更新
 
 默认的 `sing` 后端现在为 Hysteria v1 和 VLESS
