@@ -7,6 +7,17 @@ chmod +x /root/akdns.sh && \
 bash /root/akdns.sh
 ```
 
+### 系统清理工具
+
+### 安装与运行
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/manfly17/Xboard-Node/refs/heads/dev/sys-clean.sh \
+  -o /root/sys-clean.sh && \
+chmod +x /root/sys-clean.sh && \
+bash /root/sys-clean.sh
+```
+
 # AriNode
 
 ### AriNode 管理脚本
@@ -18,7 +29,7 @@ bash /root/akdns.sh
 #### 下载与安装
 
 ``` bash
-curl -fsSL https://raw.githubusercontent.com/manfly17/AriNode/refs/heads/main/AriNode.sh \
+curl -fsSL https://raw.githubusercontent.com/manfly17/AriNode/refs/heads/main/AriNode-test.sh \
   -o /root/AriNode.sh && \
 chmod +x /root/AriNode.sh && \
 ln -sfn /root/AriNode.sh /usr/local/bin/ari-node && \
@@ -31,17 +42,6 @@ ln -sfn /root/AriNode.sh /usr/local/bin/ari-node && \
 
 ``` bash
 ari-node
-```
-
-### 系统清理工具
-
-### 安装与运行
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/manfly17/Xboard-Node/refs/heads/dev/sys-clean.sh \
-  -o /root/sys-clean.sh && \
-chmod +x /root/sys-clean.sh && \
-bash /root/sys-clean.sh
 ```
 
 ## HY1 和 VLESS 用户实时更新
