@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# AriNode 安装与管理脚本（优化版）
-# Script revision: 2026-11-17
+# AriNode 安装与管理脚本
 # 安装后管理命令：ari-node
 # 适用：Debian / Ubuntu（systemd，Linux amd64 / arm64）
-# AriNode 本身采用官方原生二进制 + systemd，不依赖 Docker。
 
 set -Eeuo pipefail
 umask 077
