@@ -9,8 +9,6 @@ bash /root/akdns.sh
 
 ### 系统清理工具
 
-### 安装与运行
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/manfly17/Xboard-Node/refs/heads/dev/sys-clean.sh \
   -o /root/sys-clean.sh && \
@@ -43,6 +41,37 @@ ln -sfn /root/AriNode.sh /usr/local/bin/ari-node && \
 ``` bash
 ari-node
 ```
+
+# 节点协议支持与证书判断说明
+
+AriNode 会读取 Xboard 节点的 `Core` 字段，区分 Xray 和 Sing-box 内核，并根据节点协议、传输方式及 TLS 配置，检查协议兼容性和证书申请需求。
+
+| 协议 | Xray | Sing-box | 当前证书判断 |
+| --- | --- | --- | --- |
+| VMess | 支持 | 支持 | 已处理 |
+| VLESS | 支持 | 支持 | 已处理 |
+| Trojan | 支持 | 支持 | 已处理 |
+| Shadowsocks | 支持 | 支持 | 已处理，含插件判断 |
+| SOCKS | 不在当前 AriNode 支持范围 | 不在当前 AriNode 支持范围 | 不支持 |
+| HTTP | 不在当前 AriNode 支持范围 | 不在当前 AriNode 支持范围 | 不支持 |
+| WireGuard | 未实现 | 未实现 | 不支持 |
+| TUIC | 不支持 | 支持 | 已处理 |
+| Hysteria 2 | 不支持 | 支持 | 已处理 |
+| AnyTLS | 不支持 | 支持 | 已处理 |
+| Naive | 不支持 | 不在当前 AriNode 支持范围 | 不支持 |
+| Mieru | 不支持 | 支持 | 已处理 |
+
+---
+
+**说明：**
+
+- **支持**：表示当前脚本对应内核支持该协议。
+- **不支持**：表示当前脚本对应内核不支持该协议。
+- **未实现**：表示协议尚未在当前脚本中实现。
+- **已处理**：表示脚本已纳入该协议的证书判断逻辑。
+- **含插件判断**：Shadowsocks 会结合插件配置判断是否涉及 TLS 证书需求。
+
+证书判断会结合节点协议、传输方式及 TLS/REALITY 等相关配置进行识别，而不是仅根据协议名称决定是否申请证书。
 
 ## HY1 和 VLESS 用户实时更新
 
