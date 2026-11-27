@@ -42,7 +42,7 @@ ln -sfn /root/AriNode.sh /usr/local/bin/ari-node && \
 ari-node
 ```
 
-# 节点协议支持与证书判断说明
+### 节点协议支持与证书判断说明
 
 AriNode 会读取 Xboard 节点的 `Core` 字段，区分 Xray 和 Sing-box 内核，并根据节点协议、传输方式及 TLS 配置，检查协议兼容性和证书申请需求。
 
