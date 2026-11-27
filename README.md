@@ -51,14 +51,14 @@ AriNode 会读取 Xboard 节点的 `Core` 字段，区分 Xray 和 Sing-box 内�
 | VMess | 支持 | 支持 | 已处理 |
 | VLESS | 支持 | 支持 | 已处理 |
 | Trojan | 支持 | 支持 | 已处理 |
-| Shadowsocks | 支持 | 支持 | 已处理，含插件判断 |
-| SOCKS | 不在当前 AriNode 支持范围 | 不在当前 AriNode 支持范围 | 不支持 |
-| HTTP | 不在当前 AriNode 支持范围 | 不在当前 AriNode 支持范围 | 不支持 |
+| Shadowsocks | 支持 | 支持 | 已处理 |
+| SOCKS | 不支持 | 不支持 | 不支持 |
+| HTTP | 不支持 | 不支持 | 不支持 |
 | WireGuard | 未实现 | 未实现 | 不支持 |
 | TUIC | 不支持 | 支持 | 已处理 |
 | Hysteria 2 | 不支持 | 支持 | 已处理 |
 | AnyTLS | 不支持 | 支持 | 已处理 |
-| Naive | 不支持 | 不在当前 AriNode 支持范围 | 不支持 |
+| Naive | 不支持 | 不支持 | 不支持 |
 | Mieru | 不支持 | 支持 | 已处理 |
 
 ---
